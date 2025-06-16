@@ -318,7 +318,7 @@ elif page == "Curva de desembolsos":
         ids = df['iati-identifier'].unique()
         selected_id = st.selectbox("Selecciona el ID del proyecto", ids)
         df_sel = df[df['iati-identifier'] == selected_id]
-        # Value box: porcentaje de desembolso respecto a outgoing commitment/aprobacion (tipo 2) para el proyecto seleccionado
+        # Value box: porcentaje de desembolso respecto a outgoing commitment/aprobación (tipo 2) para el proyecto seleccionado
         df_tipo3 = df_sel[df_sel['transaction-type/@code'].astype(str).str.strip() == '3']
         outgoing_commitment = df_sel[df_sel['transaction-type/@code'].astype(str).str.strip() == '2']['value']
         if not outgoing_commitment.empty:
