@@ -182,7 +182,58 @@ if page == "Conversión Estándar de IATI":
             df_transactions = pd.read_excel(xls, sheet_name='Transacciones')
             st.session_state['df_activities'] = df_activities
             st.session_state['df_transactions'] = df_transactions
-            st.success("Archivo cargado correctamente.")
+
+            # --- VALIDACIÓN ESTRICTA DEL EXCEL ---
+            errors = []
+            # Participating-org role obligatorio y válido
+            valid_roles = {"1", "2", "3", "4"}  # funding, accountable, extending, implementing
+            valid_types = {"10", "21", "22", "23", "24", "40", "60", "70", "80", "90"}  # Ejemplo, puedes ampliar
+            # Fechas válidas
+            date_type_map = {
+                "activity-date@type=start-planned": "1",
+                "activity-date@type=start-actual": "2",
+                "activity-date@type=end-planned": "3",
+                "activity-date@type=end-actual": "4"
+            }
+            # Sector obligatorio
+            sector_at_activity = df_activities["sector/@code"].notnull().all() if "sector/@code" in df_activities.columns else False
+            sector_at_transaction = "sector/@code" in df_transactions.columns and df_transactions["sector/@code"].notnull().all()
+            # Validación por actividad
+            for idx, act in df_activities.iterrows():
+                # Participating-org role
+                role = str(act.get("participating-org/@role", "")).strip()
+                if not role or role not in valid_roles:
+                    errors.append(f"Fila {idx+2} de 'Actividades': 'participating-org/@role' es obligatorio y debe ser uno de {valid_roles}.")
+                # Participating-org type (opcional, pero si está debe ser válido)
+                type_ = str(act.get("participating-org/@type", "")).strip()
+                if type_ and type_ not in valid_types:
+                    errors.append(f"Fila {idx+2} de 'Actividades': 'participating-org/@type' debe ser uno de {valid_types} si se especifica.")
+                # Fechas: al menos una de inicio
+                has_start = False
+                for k in ["activity-date@type=start-planned", "activity-date@type=start-actual"]:
+                    val = str(act.get(k, "")).strip()
+                    if val:
+                        has_start = True
+                        # Validar formato fecha
+                        if not is_valid_date(val):
+                            errors.append(f"Fila {idx+2} de 'Actividades': '{k}' debe tener formato AAAA-MM-DD.")
+                if not has_start:
+                    errors.append(f"Fila {idx+2} de 'Actividades': Debe tener al menos una fecha de inicio (planned o actual).")
+                # Sector a nivel actividad
+                if not sector_at_activity and not sector_at_transaction:
+                    errors.append(f"Fila {idx+2} de 'Actividades': Debe haber sector a nivel actividad o en todas las transacciones.")
+            # Validación por transacción
+            if sector_at_transaction:
+                for idx, tx in df_transactions.iterrows():
+                    if not str(tx.get("sector/@code", "")).strip():
+                        errors.append(f"Fila {idx+2} de 'Transacciones': 'sector/@code' es obligatorio si se usa sector a nivel transacción.")
+            # Mostrar errores si existen
+            if errors:
+                st.error("Se encontraron los siguientes errores en tu archivo Excel:")
+                for err in errors:
+                    st.write(f"- {err}")
+                st.stop()
+            st.success("Archivo cargado y validado correctamente.")
             # --- Generar XML ---
             def safe(val):
                 return "" if pd.isnull(val) else str(val)
@@ -190,8 +241,10 @@ if page == "Conversión Estándar de IATI":
                 "iati-activities",
                 version="2.03"
             )
+            XML_NS = "http://www.w3.org/XML/1998/namespace"
             for _, act in df_activities.iterrows():
                 a = etree.SubElement(root, "iati-activity")
+                a.set(f"{{{XML_NS}}}lang", "es")
                 etree.SubElement(a, "iati-identifier").text = safe(act["iati-identifier"])
                 reporg = etree.SubElement(a, "reporting-org",
                     ref=safe(act["reporting-org/@ref"]),
@@ -202,34 +255,27 @@ if page == "Conversión Estándar de IATI":
                 etree.SubElement(title, "narrative").text = safe(act["title/narrative"])
                 descr = etree.SubElement(a, "description", type=safe(act.get("description/@type", "1")))
                 etree.SubElement(descr, "narrative").text = safe(act["description/narrative"])
-                # participating-org (obligatorio, aunque esté vacío)
-                if safe(act.get("participating-org/narrative")):
-                    part_org = etree.SubElement(
-                        a, "participating-org",
-                        role=safe(act.get("participating-org/@role")),
-                        ref=safe(act.get("participating-org/@ref")),
-                        type=safe(act.get("participating-org/@type"))
-                    )
-                    etree.SubElement(part_org, "narrative").text = safe(act.get("participating-org/narrative"))
-                else:
-                    part_org = etree.SubElement(
-                        a, "participating-org",
-                        role="", ref="", type=""
-                    )
-                    etree.SubElement(part_org, "narrative").text = ""
+                # participating-org (obligatorio, role obligatorio, type opcional)
+                role = safe(act.get("participating-org/@role"))
+                part_org_attribs = {"role": role}
+                ref = safe(act.get("participating-org/@ref"))
+                if ref:
+                    part_org_attribs["ref"] = ref
+                type_ = safe(act.get("participating-org/@type"))
+                if type_:
+                    part_org_attribs["type"] = type_
+                part_org = etree.SubElement(a, "participating-org", **part_org_attribs)
+                etree.SubElement(part_org, "narrative").text = safe(act.get("participating-org/narrative"))
                 # activity-status
                 etree.SubElement(a, "activity-status", code=safe(act["activity-status/@code"]))
-                # activity-date (start-actual, end-actual)
-                if safe(act.get("activity-date@type=start-actual")):
-                    etree.SubElement(a, "activity-date", attrib={
-                        "type": "start-actual",
-                        "iso-date": safe(act["activity-date@type=start-actual"])[:10]
-                    })
-                if safe(act.get("activity-date@type=end-actual")):
-                    etree.SubElement(a, "activity-date", attrib={
-                        "type": "end-actual",
-                        "iso-date": safe(act["activity-date@type=end-actual"])[:10]
-                    })
+                # activity-date (usar códigos numéricos)
+                for k, v in date_type_map.items():
+                    fecha = safe(act.get(k))
+                    if fecha:
+                        etree.SubElement(a, "activity-date", attrib={
+                            "type": v,
+                            "iso-date": fecha[:10]
+                        })
                 # recipient-country
                 if safe(act.get("recipient-country/@code")):
                     etree.SubElement(
@@ -238,10 +284,15 @@ if page == "Conversión Estándar de IATI":
                     )
                 # sector
                 if safe(act.get("sector/@code")):
+                    sector_attribs = {
+                        "code": safe(act["sector/@code"])
+                    }
+                    vocab = safe(act.get("sector/@vocabulary", "1"))
+                    if vocab:
+                        sector_attribs["vocabulary"] = vocab
                     etree.SubElement(
                         a, "sector",
-                        vocabulary=safe(act.get("sector/@vocabulary", "1")),
-                        code=safe(act["sector/@code"])
+                        **sector_attribs
                     )
                 # default-finance-type
                 if safe(act.get("default-finance-type/@code")):
@@ -287,6 +338,13 @@ if page == "Conversión Estándar de IATI":
                         ro = etree.SubElement(t, "receiver-org", ref=safe(tx["receiver-org/@ref"]))
                         if safe(tx.get("receiver-org/narrative")):
                             etree.SubElement(ro, "narrative").text = safe(tx["receiver-org/narrative"])
+                    # sector a nivel transacción (si aplica)
+                    if safe(tx.get("sector/@code")):
+                        sector_attribs = {"code": safe(tx["sector/@code"])}
+                        vocab = safe(tx.get("sector/@vocabulary", "1"))
+                        if vocab:
+                            sector_attribs["vocabulary"] = vocab
+                        etree.SubElement(t, "sector", **sector_attribs)
             xml_bytes = etree.tostring(root, encoding="utf-8", pretty_print=True, xml_declaration=True)
             st.download_button("Descargar XML IATI", data=xml_bytes, file_name="output_iati_activities.xml", mime="application/xml")
         else:
@@ -318,7 +376,7 @@ elif page == "Curva de desembolsos":
         ids = df['iati-identifier'].unique()
         selected_id = st.selectbox("Selecciona el ID del proyecto", ids)
         df_sel = df[df['iati-identifier'] == selected_id]
-        # Value box: porcentaje de desembolso respecto a compromiso/aprobación (outgoing commitment, tipo 2) para el proyecto seleccionado
+        # Value box: porcentaje de desembolso respecto a outgoing commitment/aprobacion (tipo 2) para el proyecto seleccionado
         df_tipo3 = df_sel[df_sel['transaction-type/@code'].astype(str).str.strip() == '3']
         outgoing_commitment = df_sel[df_sel['transaction-type/@code'].astype(str).str.strip() == '2']['value']
         if not outgoing_commitment.empty:
@@ -366,8 +424,8 @@ elif page == "Curva de desembolsos":
                 df_tabla = df_tipo3[['transaction-date', 'value', 'acumulado']].copy()
                 # Formatear la fecha para que no muestre la hora
                 df_tabla['transaction-date'] = df_tabla['transaction-date'].dt.strftime('%Y-%m-%d')
-                df_tabla['value'] = df_tabla['value'].astype(float).round(0).astype(int)
-                df_tabla['acumulado'] = df_tabla['acumulado'].astype(float).round(0).astype(int)
+                df_tabla['value'] = df_tabla['value'].astype(float).round(0).apply(lambda x: f"{int(x):,}").str.replace(",", ".")
+                df_tabla['acumulado'] = df_tabla['acumulado'].astype(float).round(0).apply(lambda x: f"{int(x):,}").str.replace(",", ".")
                 col1, col2 = st.columns([1.1, 1.9])
                 chart_height = 420  # Altura fija para ambos
                 with col1:
